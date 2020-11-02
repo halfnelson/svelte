@@ -1,6 +1,7 @@
 import { DecodedSourceMap, RawSourceMap, SourceMapLoader } from '@ampproject/remapping/dist/types/types';
 import remapping from '@ampproject/remapping';
 import { SourceMap } from 'magic-string';
+import { decode } from 'sourcemap-codec';
 
 type SourceLocation = {
 	line: number;
@@ -11,11 +12,9 @@ function last_line_length(s: string) {
 	return s.length - s.lastIndexOf('\n') - 1;
 }
 
-// mutate map in-place
-export function sourcemap_add_offset(
-	map: DecodedSourceMap, offset: SourceLocation
-) {
-	if (map.mappings.length == 0) return map;
+// mutate map in-place for perf
+export function sourcemap_add_offset(map: DecodedSourceMap, offset: SourceLocation) {
+	if (map.mappings.length == 0) return;
 	// shift columns in first line
 	const segment_list = map.mappings[0];
 	for (let segment = 0; segment < segment_list.length; segment++) {
@@ -32,7 +31,7 @@ export function sourcemap_add_offset(
 	}
 }
 
-function merge_tables<T>(this_table: T[], other_table): [T[], number[], boolean, boolean] {
+function merge_tables<T>(this_table: T[], other_table: T[]): [T[], number[], boolean, boolean] {
 	const new_table = this_table.slice();
 	const idx_map = [];
 	other_table = other_table || [];
@@ -68,18 +67,14 @@ export class StringWithSourcemap {
 	string: string;
 	map: DecodedSourceMap;
 
-	constructor(string = '', map = null) {
+	constructor(string = '', map: DecodedSourceMap = null) {
 		this.string = string;
-		if (map) {
-			this.map = map as DecodedSourceMap;
-		} else {
-			this.map = {
-				version: 3,
-				mappings: [],
-				sources: [],
-				names: []
-			};
-		}
+		this.map = map || {
+			version: 3,
+			mappings: [],
+			sources: [],
+			names: []
+		};
 	}
 
 	// concat in-place (mutable), return this (chainable)
@@ -141,7 +136,6 @@ export class StringWithSourcemap {
 		// 1. last line of first map
 		// 2. first line of second map
 		// columns of 2 must be shifted
-
 		const column_offset = last_line_length(this.string);
 		if (m2.mappings.length > 0 && column_offset > 0) {
 			const first_line = m2.mappings[0];
@@ -159,20 +153,18 @@ export class StringWithSourcemap {
 		return this;
 	}
 
-	static from_processed(string: string, map?: DecodedSourceMap): StringWithSourcemap {
-		if (map) return new StringWithSourcemap(string, map);
-		if (string == '') return new StringWithSourcemap();
-		map = { version: 3, names: [], sources: [], mappings: [] };
+	static from_processed(string: string, map?: DecodedSourceMap | RawSourceMap, offset?: SourceLocation): StringWithSourcemap {
+		if (string == '' && !offset) return new StringWithSourcemap();
 
-		// add empty SourceMapSegment[] for every line
-		const line_count = (string.match(/\n/g) || '').length;
-		for (let i = 0; i < line_count; i++) map.mappings.push([]);
-		return new StringWithSourcemap(string, map);
+		// if we don't have a map, we generate a simple one with an empty segment for each line
+		map = map || { version: 3, names: [], sources: [], mappings: (string.match(/\n/g) || []).map(() => []) };
+		
+		if (typeof map.mappings == 'string') map.mappings = decode(map.mappings);
+		if (offset) sourcemap_add_offset(map as DecodedSourceMap, offset);
+		return new StringWithSourcemap(string, map as DecodedSourceMap);
 	}
 
-	static from_source(
-		source_file: string, source: string, offset?: SourceLocation
-	): StringWithSourcemap {
+	static from_source(source_file: string, source: string, offset?: SourceLocation): StringWithSourcemap {
 		if (!offset) offset = { line: 0, column: 0 };
 		const map: DecodedSourceMap = { version: 3, names: [], sources: [source_file], mappings: [] };
 		if (source == '') return new StringWithSourcemap(source, map);
@@ -199,10 +191,7 @@ export class StringWithSourcemap {
 	}
 }
 
-export function combine_sourcemaps(
-	filename: string,
-	sourcemap_list: Array<DecodedSourceMap | RawSourceMap>
-): RawSourceMap {
+export function combine_sourcemaps(filename: string, sourcemap_list: Array<DecodedSourceMap | RawSourceMap>): RawSourceMap {
 	if (sourcemap_list.length == 0) return null;
 
 	let map_idx = 1;
@@ -230,7 +219,6 @@ export function combine_sourcemaps(
 			);
 
 	if (!map.file) delete map.file; // skip optional field `file`
-
 	return map;
 }
 
@@ -241,17 +229,16 @@ export function apply_preprocessor_sourcemap(filename: string, svelte_map: Sourc
 	if (!svelte_map || !preprocessor_map_input) return svelte_map;
 
 	const preprocessor_map = typeof preprocessor_map_input === 'string' ? JSON.parse(preprocessor_map_input) : preprocessor_map_input;
-
 	const result_map = combine_sourcemaps(
 		filename,
 		[
 			svelte_map as RawSourceMap,
 			preprocessor_map
 		]
-	) as RawSourceMap;
+	);
 
-	//Svelte expects a SourceMap which includes toUrl and toString. Instead of using the magic-string constructor that takes a decoded map
-	//we just tack on the extra properties.
+	// Svelte expects a SourceMap which includes toUrl and toString utility functions.
+	// Instead of using the magic-string SourceMap class, we just tack on the extra properties.
 	Object.defineProperties(result_map, {
 		toString: {
 			enumerable: false,
