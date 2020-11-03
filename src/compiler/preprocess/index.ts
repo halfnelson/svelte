@@ -129,28 +129,29 @@ async function preprocess_tag_content(filename: string, tag: TagTarget,  preproc
 
 function replace_tag_content(filename: string, source: string, processed_tags: ProcessedTag[]) {
 	// build final content from start to end of markup, substituting our processed tags as we get to them
-	processed_tags.sort((a,b) => a.tag.offset > b.tag.offset ? 1 : (a.tag.offset == b.tag.offset ? 0 : -1));
+	processed_tags.sort((a,b) => a.tag.offset - b.tag.offset);
 
 	const out = new StringWithSourcemap();
 	const dependencies = [];
 	let last_end = 0;
-	const locator = getLocator(source);
+	const get_location = getLocator(source);
 	for (const { tag, processed } of processed_tags) {
-		
 		const open_tag = `<${tag.tag_name}${tag.attributes}>`;
 		const close_tag = `</${tag.tag_name}>`;
 		
-		// leading_content = unchanged source characters before the replaced segment
+		// leading_markup = unchanged source characters before the replaced segment
 		// we inject our own version of the opening and closing tags so that we can support self closing tags
-		const leading_content = StringWithSourcemap.from_source(filename, source.slice(last_end, tag.offset) + open_tag, locator(last_end));
-		const processed_content = StringWithSourcemap.from_processed(processed.code, processed.map, locator(tag.content_offset));
-		const trailing_content = StringWithSourcemap.from_source(filename, close_tag, locator(tag.content_offset + tag.content.length - 1));
-		out.concat(leading_content).concat(processed_content).concat(trailing_content);
+		const leading_markup = StringWithSourcemap.from_source(filename, source.slice(last_end, tag.offset) + open_tag, get_location(last_end));
+		const processed_tag_content = StringWithSourcemap.from_processed(processed.code, processed.map, get_location(tag.content_offset));
+		const trailing_markup = StringWithSourcemap.from_source(filename, close_tag, get_location(tag.content_offset + tag.content.length - 1));
+
+		out.concat(leading_markup).concat(processed_tag_content).concat(trailing_markup);
+
 		last_end = tag.offset + tag.length;
 		dependencies.push(...processed.dependencies);
 	}
 	// final_content = unchanged source characters after last replaced segment
-	const final_content = StringWithSourcemap.from_source(filename, source.slice(last_end), locator(last_end));
+	const final_content = StringWithSourcemap.from_source(filename, source.slice(last_end), get_location(last_end));
 	
 	const processed_content = out.concat(final_content);
 
@@ -195,7 +196,7 @@ export default async function preprocess(
 		tag_processors.push(...preprocessed_style_tags);
 	}
 
-	const processed_tags = (await Promise.all(tag_processors)).filter(t => t != null);
+	const processed_tags = (await Promise.all(tag_processors)).filter(Boolean);
 
 	// create the final output by inserting the processed tags into the processed markup
 	if (processed_tags.length) {
@@ -211,7 +212,7 @@ export default async function preprocess(
 		map: target.getCombinedSourceMap(),
 		dependencies: [...target.dependencies],
 		toString() {
-			return target.source;
+			return this.code;
 		}
 	};
 }
